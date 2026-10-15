@@ -7,11 +7,12 @@ High-throughput, low-allocation HTTP backend framework for Dart.
 `dart_backend_framework` is an HTTP transport and execution framework designed to avoid unnecessary
 garbage-collector pressure and to stay close to the throughput of raw `dart:io`.
 
-It has no database dependency. Database integrations are separate packages that plug into it, the way
-`shelf_router` plugs into `shelf`: [`dart_backend_framework_postgres`](https://github.com/tganzerli/dart_backend_framework_postgres)
-adds a per-request row-level-security transaction over
-[`dart_db_connector_postgres`](https://github.com/tganzerli/dart_db_connector_postgres). An app depends on the
-framework, on the database packages it needs (several are fine) and on the extensions it wants.
+It has no database dependency. Each database gets one kit, a separate package that holds the pieces for using the
+framework together with that database's connector:
+[`dart_backend_framework_postgres`](https://github.com/tganzerli/dart_backend_framework_postgres) is the PostgreSQL
+kit over [`dart_db_connector_postgres`](https://github.com/tganzerli/dart_db_connector_postgres), with a per-request
+row-level-security transaction (`rlsTransaction`) and a prefix search builder (`prefixTsQuery`). An app depends on
+the framework and on the kit of each database it uses (several are fine).
 
 **Experimental, not on pub.dev yet.** Install by `git` reference to a tag:
 
@@ -20,7 +21,7 @@ dependencies:
   dart_backend_framework:
     git:
       url: https://github.com/tganzerli/dart_backend_framework
-      ref: v0.1.0
+      ref: v0.1.1
 ```
 
 ## Core Architecture Principles
@@ -30,7 +31,7 @@ dependencies:
 3. **Composable Pre-Folded Pipeline (P4)**: Interceptors chained and statically folded at server startup with zero per-request allocation overhead and short-circuit support.
 4. **Radix/Trie High Performance Router (P5)**: O(k) URL segment lookup with static route precedence, dynamic parameters (`:id`), wildcards (`*path`), 405 Method Not Allowed (`Allow` header) and 404 Not Found.
 5. **Guaranteed Lifecycle Cleanup (P6)**: LIFO execution of cleanup hooks (`request.addCleanupHook`) in a `try/finally` that closes only **after the response is fully written** (streamed bodies included), so connections borrowed from pools are released deterministically, also upon uncaught errors or client TCP disconnects.
-6. **Decoupled Architecture (P7)**: Database-agnostic web transport; database access lives in the app or in extension packages.
+6. **Decoupled Architecture (P7)**: Database-agnostic web transport; database access lives in the app or in a database kit.
 
 ## Quickstart
 
@@ -61,6 +62,82 @@ void main() async {
   print('Server listening on http://localhost:${server.port}');
 }
 ```
+
+## Writing an interceptor
+
+An interceptor receives the request and `next`, the rest of the pipeline. It either returns a `Response` itself,
+which ends the request there, or calls `next(request)` and may inspect or replace what comes back. Interceptors run
+in the order they were added to the `Pipeline`, and the chain is folded once, when `addHandler` is called.
+
+The plain form is a function with the `InterceptorFunction` signature:
+
+```dart
+FutureOr<Response> requireApiKey(Request request, NextFunction next) {
+  final key = request.getHeader('x-api-key');
+  if (key == null) return Response.unauthorized();
+  request.context.set(ApiKey(key)); // typed, one value per type
+  return next(request);
+}
+
+// In a handler further down:
+final key = request.context.get<ApiKey>(); // getOrNull<ApiKey>() when it may be absent
+```
+
+When the interceptor holds configuration or state, implement `Interceptor` and add its `intercept` method:
+
+```dart
+final class Timing implements Interceptor {
+  Timing(this.slowThreshold);
+  final Duration slowThreshold;
+
+  @override
+  Future<Response> intercept(Request request, NextFunction next) async {
+    final watch = Stopwatch()..start();
+    final response = await next(request);
+    if (watch.elapsed > slowThreshold) print('slow: ${request.uri.path}');
+    return response;
+  }
+}
+
+final app = Pipeline()
+    .add(requireApiKey)
+    .add(Timing(const Duration(milliseconds: 200)).intercept)
+    .addHandler(router.handler);
+```
+
+`request.context` is created on first use and lives as long as the request; `setKey` / `getKeyOrNull` store values
+under an explicit key when two values share a type. To release a resource after the response is fully written,
+register `request.addCleanupHook` instead of relying on code after `next`, which runs before a streamed body ends.
+
+## Errors and logging
+
+Two hooks on `BackendServer.bind` handle failures, and they do different jobs:
+
+* **`errorHandler`** turns an unhandled error into the response the client gets. The default answers `413` for
+  `PayloadTooLargeException` and a generic `500` for anything else. A custom handler **replaces** the default, so
+  it has to answer the `413` case itself.
+* **`onError`** reports the failure on the server side and returns nothing. It receives every unhandled handler
+  error (except `PayloadTooLargeException`) and every failure while writing the response, including the ones that
+  happen after the client already has the status line. The default writes one line to `stderr`.
+
+```dart
+final server = await BackendServer.bind(
+  handler: app,
+  port: 8080,
+  errorHandler: (error, stackTrace, request) => switch (error) {
+    PayloadTooLargeException() => Response(413),
+    NotFoundError() => Response.notFound(),
+    _ => Response.internalServerError(),
+  },
+  onError: (error, stackTrace, request) =>
+      log.severe('${request?.uri.path}', error, stackTrace),
+);
+```
+
+If the `errorHandler` itself throws, the error goes to `onError` and the client gets a plain `500`.
+
+`requestLogger()` writes one line per request (method, path, status, duration) with `print`; pass `logFn` to send
+it somewhere else, e.g. `requestLogger(logFn: log.info)`.
 
 ## Safety Defaults
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+Documentation only; no code change.
+
+- README: new sections "Writing an interceptor" (function and class forms, short-circuit, typed request context,
+  cleanup hooks) and "Errors and logging" (`errorHandler` versus `onError`, why a custom `errorHandler` must answer
+  `413` itself, `requestLogger(logFn:)`).
+- README: the PostgreSQL package is described as the database kit it is (`rlsTransaction` and `prefixTsQuery`),
+  one kit per database.
+
 ## 0.1.0
 
 First public release, consumed by `git` reference to the tag `v0.1.0`.

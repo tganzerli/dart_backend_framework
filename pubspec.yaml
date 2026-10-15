@@ -2,7 +2,7 @@ name: dart_backend_framework
 description: >
   High-throughput, low-allocation HTTP backend framework for Dart.
   Designed for maximum concurrency and minimal GC pressure over dart:io.
-version: 0.1.0
+version: 0.1.1
 publish_to: none
 
 repository: https://github.com/tganzerli/dart_backend_framework
